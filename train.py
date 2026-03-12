@@ -7,6 +7,7 @@ Usage: uv run train.py
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TRITON_PTXAS_PATH"] = "/usr/local/cuda/bin/ptxas"
 
 import gc
 import math
@@ -17,11 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -74,7 +71,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
-    def forward(self, x, ve, cos_sin, window_size):
+    def forward(self, x, ve, cos_sin, block_mask):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -90,8 +87,10 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        # flex_attention expects (B, H, T, D)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        y = flex_attention(q, k, v, block_mask=block_mask, enable_gqa=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
@@ -115,8 +114,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+    def forward(self, x, ve, cos_sin, block_mask):
+        x = x + self.attn(norm(x), ve, cos_sin, block_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -197,13 +196,24 @@ class GPT(nn.Module):
         assert all(c in "SL" for c in pattern)
         long_window = config.sequence_len
         short_window = long_window // 2
-        char_to_window = {"L": (long_window, 0), "S": (short_window, 0)}
+        char_to_window = {"L": long_window, "S": short_window}
         window_sizes = []
         for layer_idx in range(config.n_layer):
             char = pattern[layer_idx % len(pattern)]
             window_sizes.append(char_to_window[char])
-        window_sizes[-1] = (long_window, 0)
+        window_sizes[-1] = long_window
         return window_sizes
+
+    def create_block_masks(self, device):
+        """Create flex_attention block masks (call after model is on device)."""
+        T = self.config.sequence_len
+        unique_windows = set(self.window_sizes)
+        masks = {}
+        for w in unique_windows:
+            def mask_fn(b, h, q_idx, kv_idx, _w=w):
+                return (q_idx >= kv_idx) & (q_idx - kv_idx <= _w)
+            masks[w] = create_block_mask(mask_fn, B=None, H=None, Q_LEN=T, KV_LEN=T, device=device)
+        self._block_masks = [masks[w] for w in self.window_sizes]
 
     def estimate_flops(self):
         """Estimated FLOPs per token (forward + backward)."""
@@ -215,8 +225,7 @@ class GPT(nn.Module):
         q = self.config.n_embd // self.config.n_head
         t = self.config.sequence_len
         attn_flops = 0
-        for window_size in self.window_sizes:
-            window = window_size[0]
+        for window in self.window_sizes:
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
         return 6 * (nparams - nparams_exclude) + attn_flops
@@ -276,7 +285,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i])
+            x = block(x, ve, cos_sin, self._block_masks[i])
         x = norm(x)
 
         softcap = 15
@@ -483,6 +492,7 @@ with torch.device("meta"):
     model = GPT(config)
 model.to_empty(device=device)
 model.init_weights()
+model.create_block_masks(device)
 
 param_counts = model.num_scaling_params()
 print("Parameter counts:")
