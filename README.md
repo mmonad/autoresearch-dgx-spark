@@ -1,4 +1,48 @@
-# autoresearch
+# autoresearch — DGX Spark fork
+
+Fork of [karpathy/autoresearch](https://github.com/karpathy/autoresearch) that runs out-of-the-box on the NVIDIA DGX Spark (GB10 chip, Blackwell sm_121a, 128GB unified memory).
+
+## Why this fork?
+
+The upstream repo targets H100 and depends on Flash Attention 3 kernels (`kernels` package), which are Hopper-only (sm_90) and don't work on the GB10. Even after swapping out FA3, the default PyTorch cu128 wheels only support up to sm_120 — the GB10's sm_121a needs cu130 for native codegen. Without these changes you either can't run at all or run at ~1/3 speed.
+
+### What we changed
+
+| Change | Why | Impact |
+|---|---|---|
+| FA3 → `flex_attention` | FA3 kernels don't compile on sm_121a. flex_attention uses Triton-generated kernels that work on any arch, with sliding window via `create_block_mask` | Training runs at all |
+| PyTorch cu128 → cu130 | cu130 ships CUDA 13.0 with native sm_121a codegen + cuDNN 9.13 | **2.86x throughput** (49K → 140K tok/sec) |
+| Python 3.10 → 3.13 | Better compatibility with cu130 torch wheels | Clean install |
+| MFU constant: H100 → GB10 | GB10 peaks at 125 TFLOPS BF16, not 989.5 | Accurate reporting (~27% vs misleading ~3%) |
+| Drop `kernels` dependency | No longer needed without FA3 | Simpler setup |
+
+### What we benchmarked (and ruled out)
+
+We tested a bunch of other configurations that ended up having no impact — the GB10 is firmly memory-bandwidth limited at 273 GB/s:
+
+- **FlashAttention-4** (blake-snc SM120 fork) — identical perf to flex_attention at training dimensions
+- **cuDNN SDPA backend** — slightly slower than flex_attention, doesn't support sliding window masks
+- **torch.compile `max-autotune` / `reduce-overhead`** — CUDA graphs crash with gradient accumulation on this hardware
+- **Inductor tuning** (coordinate descent, max_autotune, bf16 reduced precision) — no measurable difference
+- **DEVICE_BATCH_SIZE=256** — regression; bandwidth-limited, not compute-limited
+- **flex_attention kernel_options** — `ROWS_GUARANTEED_SAFE` / `BLOCKS_ARE_CONTIGUOUS` cause training failure (likely Triton sm_121a codegen bug)
+
+### Baseline numbers (stock config, no hyperparameter tuning)
+
+```
+val_bpb:       1.47
+tok/sec:       ~140,000
+mfu:           ~27%
+peak_vram:     45 GB / 128 GB
+steps (5min):  91
+params:        50.3M
+```
+
+---
+
+*Below is the original README from upstream.*
+
+---
 
 ![teaser](progress.png)
 
@@ -20,7 +64,7 @@ If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/s
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** NVIDIA DGX Spark (GB10), Python 3.13+, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 
