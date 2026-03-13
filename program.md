@@ -7,14 +7,15 @@ This is an experiment to have the LLM do its own research.
 To set up a new experiment, work with the user to:
 
 1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
+2. **Create a worktree + branch**: Use `git worktree add ../autoresearch-<tag> -b autoresearch/<tag>` to create an isolated working copy. All experiment work happens in the worktree directory (`../autoresearch-<tag>`), NOT in the main repo checkout. This keeps the main repo clean and avoids conflicts if multiple experiments run in parallel.
+3. **`cd` into the worktree**: All subsequent commands run from `../autoresearch-<tag>`.
+4. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+5. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
+6. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+7. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -30,7 +31,30 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+**The goal is simple: get the lowest val_bpb.** But achieving this within a fixed wall clock budget is a dual challenge: you must both **train better** (algorithmic improvements — architecture, optimizer, hyperparameters) and **train faster** (throughput improvements — more tokens processed in the same 5 minutes). A change that improves per-step learning but halves throughput may be a net loss; conversely, a neutral-per-step change that doubles throughput gives you 2x the training steps, which can dramatically lower val_bpb. Always consider both dimensions.
+
+**Hardware context — NVIDIA DGX Spark (GB10 Grace Blackwell Superchip):**
+
+This system has a unique hardware profile that shapes what optimizations are effective:
+
+| Spec | Value | Implication |
+|---|---|---|
+| GPU arch | Blackwell SM121a (sm_121a) | Not datacenter Blackwell (SM100). Some kernels/libraries don't support it. Only CUDA 13.0+ (cu130) has native codegen. |
+| CUDA cores | 6,144 | ~1/15th of an H100. Compute is modest. |
+| Tensor cores | 192 (5th-gen) | Support FP64/FP32/BF16/FP8/FP4. BF16 tensor peak ~125 TFLOPS. |
+| Memory | 128 GB unified LPDDR5x | Shared coherently between CPU and GPU via NVLink-C2C. Huge capacity, but... |
+| Memory bandwidth | 273 GB/s | **This is the primary bottleneck.** ~4.5x lower than an H100 (3.35 TB/s). The system is firmly memory-bandwidth-limited. |
+| L2 cache | 24 MB (+ 16 MB L4 side cache) | Smaller than desktop GPUs. Cache-friendly access patterns matter more. |
+| TDP | 240W (whole system) | Low power envelope means thermals are not an issue. |
+
+**What this means for optimization strategy:**
+
+- **You are memory-bandwidth-limited, not compute-limited.** The 273 GB/s bandwidth is the bottleneck, not the tensor core TFLOPS. Optimizations that reduce memory traffic (fewer parameters to load, better data reuse, fused operations) are more valuable than those that merely reduce FLOPs.
+- **Throughput is king.** At ~140K tok/sec baseline and only ~91 steps in 5 minutes, every extra step matters. Changes that increase tok/sec (smaller models that still learn well, larger batch sizes that amortize overhead, fewer memory-bound operations) directly translate to more training and lower val_bpb.
+- **Kernel/software support is limited.** SM121a is not mainstream. Flash Attention 3 doesn't work (we use flex_attention via Triton). torch.compile with CUDA graphs can crash. Some Triton kernel options cause failures. Always be cautious with advanced kernel tricks — they may silently fail or produce wrong results on this arch.
+- **FP8 training is theoretically supported** by the 5th-gen tensor cores but driver/compiler maturity for FP8 on SM121a is uncertain. If attempting lower-precision training, validate carefully.
+- **Unified memory means no CPU-GPU transfer cost** but also means CPU and GPU compete for the same 273 GB/s bandwidth. CPU-heavy data preprocessing during training could steal bandwidth from the GPU.
+- **Large model capacity (128 GB) is a trap.** You can fit very large models in memory, but the bandwidth bottleneck means you can't feed them fast enough. The sweet spot is a model that's large enough to learn well but small enough to achieve high throughput given the bandwidth constraint.
 
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
 
@@ -89,7 +113,7 @@ d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+The experiment runs in a dedicated worktree + branch (e.g. worktree `../autoresearch-mar5` on branch `autoresearch/mar5`). All work happens in the worktree directory, not the main repo checkout.
 
 LOOP FOREVER:
 
