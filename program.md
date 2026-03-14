@@ -133,6 +133,22 @@ The idea is that you are a completely autonomous researcher trying things out. I
 
 **Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. The loop runs until the human interrupts you, period.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+
+## Beyond tuning: when to shift gears
+
+Hyperparameter sweeps have diminishing returns. When most experiments are discards and improvements are within noise, you've reached a plateau — the model is locally optimal under its current architecture. **This is the signal to stop tuning and start innovating.**
+
+At this point, single-parameter changes won't move the needle. What will:
+
+**Use `results.tsv` as a research journal.** Before proposing a new experiment, re-read the full results log. It tells you what's been tried, what worked, what failed, and why. Use it to avoid repeating past mistakes and to spot patterns — e.g. "every throughput-reducing change was a net loss" or "optimizer changes near X value were all noise." Let the data guide your next hypothesis.
+
+**Search for new ideas.** Use web search to find recent papers, blog posts, and techniques. Look for what's working in efficient language model training *right now* — the field moves fast. Don't limit yourself to what you already know. Read broadly: new optimizers, new architectures, new training recipes, new attention mechanisms. Implement what looks promising.
+
+**Make structural changes, not incremental ones.** Rewrite the model architecture. Change how attention works. Replace components entirely. Try ideas from adjacent fields. The expected value of bold experiments is higher than safe ones when you're on a plateau — a risky rewrite that crashes twice but eventually gives -0.01 is worth more than twenty safe tweaks at -0.0002 each.
+
+**Combine near-misses.** If several changes were each slightly worse individually, try combining them — interactions between changes can be non-linear. Two changes that each hurt throughput slightly might together enable a qualitatively different operating point.
+
+**Revisit assumptions.** Question everything inherited from earlier experiments: Is this the right model size? The right depth/width ratio? The right optimizer? The right way to do attention? Earlier experiments established these under different conditions — they may no longer be optimal.
