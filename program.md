@@ -21,7 +21,12 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+Each experiment runs on a single GPU. The training script supports two stopping modes, controlled by `TOKEN_BUDGET` in `train.py`:
+
+- **Wall clock time** (default): `TOKEN_BUDGET = None` — training runs for the fixed `TIME_BUDGET` (5 minutes). Rewards both algorithmic quality and throughput. Good for practical optimization where speed matters.
+- **Fixed token budget**: `TOKEN_BUDGET = 100_000_000` (or similar) — training runs for exactly N tokens regardless of speed. Isolates learning efficiency from throughput. Good for architecture research where you want to compare how well different models learn from the same data.
+
+The user will tell you which mode to use. Launch with: `uv run train.py`.
 
 **What you CAN do:**
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.

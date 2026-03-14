@@ -455,6 +455,9 @@ WARMUP_RATIO = 0.0      # fraction of time budget for LR warmup
 WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
+# Stopping condition: set exactly one, set the other to None
+TOKEN_BUDGET = None      # e.g. 100_000_000 for 100M tokens; None = use TIME_BUDGET
+
 # Model size
 DEPTH = 8               # number of transformer layers
 DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
@@ -523,7 +526,7 @@ x, y, epoch = next(train_loader)  # prefetch first batch
 print(f"Time budget: {TIME_BUDGET}s")
 print(f"Gradient accumulation steps: {grad_accum_steps}")
 
-# Schedules (all based on progress = training_time / TIME_BUDGET)
+# Schedules (progress = fraction of budget used, 0.0 to 1.0)
 
 def get_lr_multiplier(progress):
     if progress < WARMUP_RATIO:
@@ -562,7 +565,11 @@ while True:
         x, y, epoch = next(train_loader)
 
     # Progress and schedules
-    progress = min(total_training_time / TIME_BUDGET, 1.0)
+    total_tokens = (step + 1) * TOTAL_BATCH_SIZE
+    if TOKEN_BUDGET is not None:
+        progress = min(total_tokens / TOKEN_BUDGET, 1.0)
+    else:
+        progress = min(total_training_time / TIME_BUDGET, 1.0)
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
     muon_weight_decay = get_weight_decay(progress)
@@ -595,9 +602,13 @@ while True:
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
     mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / GB10_BF16_PEAK_FLOPS
-    remaining = max(0, TIME_BUDGET - total_training_time)
+    if TOKEN_BUDGET is not None:
+        remaining_tok = max(0, TOKEN_BUDGET - total_tokens)
+        remaining_str = f"remaining: {remaining_tok / 1e6:.1f}M tok"
+    else:
+        remaining_str = f"remaining: {max(0, TIME_BUDGET - total_training_time):.0f}s"
 
-    print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
+    print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | {remaining_str}    ", end="", flush=True)
 
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
@@ -609,13 +620,16 @@ while True:
 
     step += 1
 
-    # Time's up — but only stop after warmup steps so we don't count compilation
-    if step > 10 and total_training_time >= TIME_BUDGET:
-        break
+    # Budget exhausted — only stop after warmup steps so we don't count compilation
+    if step > 10:
+        if TOKEN_BUDGET is not None and total_tokens >= TOKEN_BUDGET:
+            break
+        elif TOKEN_BUDGET is None and total_training_time >= TIME_BUDGET:
+            break
 
 print()  # newline after \r training log
 
-total_tokens = step * TOTAL_BATCH_SIZE
+total_tokens = step * TOTAL_BATCH_SIZE  # final count
 
 # Final eval
 model.eval()
