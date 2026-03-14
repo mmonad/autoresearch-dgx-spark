@@ -1,0 +1,5 @@
+commit	val_bpb	memory_gb	status	description
+5cedba2	1.455705	44.0	keep	baseline
+f0a8c35	1.614202	66.4	discard	increase depth from 8 to 10 (fewer steps hurt)
+b326a03	1.440152	44.0	keep	increase LRs: matrix 0.04->0.06 embedding 0.6->0.8 unembed 0.004->0.006
+e5febf7	1.437060	44.0	keep	push LRs higher: matrix 0.08 embedding 1.0 unembed 0.008
